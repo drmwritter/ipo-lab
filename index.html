@@ -31,7 +31,7 @@ const setCustomModel = (m) => {
 // Ask the API which models this key can actually use, and keep our preferred order.
 const discoverModels = async (apiKey) => {
   try {
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': apiKey.trim() } });
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey.trim())}`);
     if (!res.ok) return [];
     const data = await res.json();
     const avail = (data.models || [])
@@ -46,6 +46,21 @@ const discoverModels = async (apiKey) => {
 };
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 const geminiHeaders = (apiKey) => ({ 'Content-Type': 'application/json', 'x-goog-api-key': apiKey.trim() });
+// Browsers can block the x-goog-api-key header (CORS preflight), which shows up as a TypeError.
+// If that happens, retry with the key as a ?key= query parameter, Google's other supported method.
+let KEY_IN_QUERY = false;
+const geminiPost = async (model, payload, apiKey) => {
+  const body = JSON.stringify(payload);
+  if (!KEY_IN_QUERY) {
+    try {
+      return await fetch(geminiUrl(model), { method: 'POST', headers: geminiHeaders(apiKey), body });
+    } catch (e) {
+      if (e.name !== 'TypeError') throw e;
+      KEY_IN_QUERY = true;
+    }
+  }
+  return await fetch(`${geminiUrl(model)}?key=${encodeURIComponent(apiKey.trim())}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+};
 
 // Gemini can split text across parts when Search grounding is on: join them all.
 const getText = (candidate) => (candidate?.content?.parts || []).map(p => p.text || '').join('').trim();
@@ -78,14 +93,9 @@ const fileToBase64 = (file) => new Promise((resolve, reject) => {
 const fetchWithRetry = async (payload, apiKey, retries = 2, delay = 1000) => {
   let lastError;
   for (const model of MODELS_TO_TRY) {
-    const API_URL = geminiUrl(model);
     for (let i = 0; i < retries; i++) {
       try {
-        const response = await fetch(API_URL, {
-          method: 'POST',
-          headers: geminiHeaders(apiKey),
-          body: JSON.stringify(payload)
-        });
+        const response = await geminiPost(model, payload, apiKey);
         if (!response.ok) {
           if (response.status === 404) {
             lastError = new Error(`HTTP 404: Model ${model} not found`);
@@ -449,18 +459,15 @@ function App() {
   const verifyApiKey = async () => {
     if (!apiKey) return;
     setKeyStatus('testing');
-    await discoverModels(apiKey);
+    const found = await discoverModels(apiKey);
     setCustomModel(customModel);
+    if (!found.length) console.warn('Model discovery failed; using default list');
     let lastErrorMsg = null;
     let success = false;
 
     for (const model of MODELS_TO_TRY) {
       try {
-        const res = await fetch(geminiUrl(model), {
-          method: 'POST',
-          headers: geminiHeaders(apiKey),
-          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'test' }] }] })
-        });
+        const res = await geminiPost(model, { contents: [{ role: 'user', parts: [{ text: 'test' }] }] }, apiKey);
 
         if (res.ok) {
           setKeyStatus(`valid (using ${model})`);
@@ -470,7 +477,8 @@ function App() {
           lastErrorMsg = `404 Not Found (${model})`;
           continue; // Try the next model in the fallback list
         } else if (res.status === 403 || res.status === 401) {
-          setKeyStatus('invalid (Unauthorized - check key)');
+          const ed = await res.json().catch(() => ({}));
+          setKeyStatus(`invalid (${res.status}: ${ed.error?.message || 'check key'})`);
           return;
         } else if (res.status === 400) {
           const errorData = await res.json().catch(() => ({}));
@@ -479,16 +487,19 @@ function App() {
             setKeyStatus(`invalid (Bad Request - ${msg})`);
             return;
           }
-          lastErrorMsg = `400 Bad Request (${model})`;
+          lastErrorMsg = `400 (${model}): ${msg}`;
           continue;
         } else {
-          lastErrorMsg = `HTTP ${res.status}`;
+          const ed = await res.json().catch(() => ({}));
+          lastErrorMsg = `HTTP ${res.status} (${model}): ${ed.error?.message || ''}`;
           continue;
         }
       } catch (err) {
         // Log the error for this model but CONTINUE the loop to try the next one!
         // This prevents CORS network errors (TypeError) on 404s/400s from breaking the fallback sequence.
-        lastErrorMsg = err.message;
+        lastErrorMsg = err.name === 'TypeError'
+          ? `network blocked (${model}): ${err.message}. Try disabling content blockers / Private Relay, or another browser`
+          : `${model}: ${err.message}`;
         continue;
       }
     }
