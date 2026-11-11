@@ -1,0 +1,834 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>S-1 IPO Valuation & Backtesting Lab</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head><body class="bg-slate-950"><div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+// --- SVGs for Icons ---
+const IconSearch = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>;
+const IconTrendingUp = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>;
+const IconShieldCheck = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9 12l2 2 4-4"></path></svg>;
+const IconAlert = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>;
+const IconPlay = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>;
+const IconEdit = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>;
+const IconUpload = ({ className = '' }) => <svg className={className} xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>;
+const IconFileText = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>;
+const IconKey = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>;
+
+// --- API Helper ---
+const DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+let MODELS_TO_TRY = DEFAULT_MODELS;
+const setCustomModel = (m) => { MODELS_TO_TRY = m && m.trim() ? [m.trim(), ...DEFAULT_MODELS] : DEFAULT_MODELS; };
+const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+const geminiHeaders = (apiKey) => ({ 'Content-Type': 'application/json', 'x-goog-api-key': apiKey.trim() });
+
+// Gemini can split text across parts when Search grounding is on: join them all.
+const getText = (candidate) => (candidate?.content?.parts || []).map(p => p.text || '').join('').trim();
+
+// Current API returns groundingChunks; older responses used groundingAttributions.
+const getSources = (candidate) => {
+  const gm = candidate?.groundingMetadata;
+  const raw = gm?.groundingChunks || gm?.groundingAttributions || [];
+  const seen = new Set();
+  return raw.map(c => ({ uri: c.web?.uri, title: c.web?.title }))
+    .filter(s => s.uri && s.title && !seen.has(s.uri) && seen.add(s.uri));
+};
+
+// Search grounding can't be combined with JSON mode, so ask for JSON in text and extract it.
+const parseJsonFromText = (text) => {
+  if (!text) return null;
+  const cleaned = text.replace(/```json|```/g, '');
+  const start = cleaned.indexOf('{'), end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try { return JSON.parse(cleaned.slice(start, end + 1)); } catch (e) { return null; }
+};
+
+const fileToBase64 = (file) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = reject;
+  r.readAsDataURL(file);
+});
+
+const fetchWithRetry = async (payload, apiKey, retries = 2, delay = 1000) => {
+  let lastError;
+  for (const model of MODELS_TO_TRY) {
+    const API_URL = geminiUrl(model);
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(API_URL, {
+          method: 'POST',
+          headers: geminiHeaders(apiKey),
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+          if (response.status === 404) {
+            lastError = new Error(`HTTP 404: Model ${model} not found`);
+            break; // Break retry loop for this model, fallback to next model
+          }
+          if (response.status === 400) {
+            const errData = await response.json().catch(() => ({}));
+            if (errData.error?.message?.toLowerCase().includes("key")) {
+                throw new Error(`Invalid API Key: ${errData.error.message}`);
+            }
+            lastError = new Error(`HTTP 400: Model ${model} failed`);
+            break;
+          }
+          if (response.status === 429) throw new Error("Rate limited");
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return await response.json();
+      } catch (err) {
+        lastError = err;
+        // If it's a 404, 400, or a CORS error (TypeError) caused by missing headers, break and try next model
+        if (err.message.includes("404") || err.message.includes("400") || err.message.includes("Invalid API Key") || err.name === "TypeError") break;
+        if (i === retries - 1) break; // Max retries hit, move to next model if any
+        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+      }
+    }
+  }
+  throw lastError; // Throw if all models fail
+};
+
+// --- Mock Data for Demo Mode ---
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- Main Application ---
+function App() {
+  // Global State
+  const [apiKey, setApiKey] = useState("");
+  const [keyStatus, setKeyStatus] = useState(null);
+  const [mode, setMode] = useState('backtest'); // 's1' (upload) or 'backtest' (ticker)
+  const [targetCompany, setTargetCompany] = useState('SNOW');
+  const [sharesOutstanding, setSharesOutstanding] = useState(277); // 277M default (e.g. SNOW)
+  const [uploadedFileName, setUploadedFileName] = useState("");
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [customModel, setCustomModelState] = useState("");
+  const [actualPriceSource, setActualPriceSource] = useState(null);
+  const [sharesNote, setSharesNote] = useState("");
+  const [isRunningAgents, setIsRunningAgents] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [actualIpoPrice, setActualIpoPrice] = useState(null);
+
+  // Agent Outputs
+  const [agentLogs, setAgentLogs] = useState({
+    checker: { status: 'idle', data: null, sources: [] },
+    financials: { status: 'idle', data: null, sources: [] },
+    market: { status: 'idle', data: null, sources: [] },
+    comps: { status: 'idle', data: null, sources: [] },
+    synthesis: { status: 'idle', data: null }
+  });
+
+  // Scenarios State (Editable)
+  const [scenarios, setScenarios] = useState({
+    bear: { revenue: 500, multiple: 30, rationale: "Growth slows; margin pressure increases." },
+    base: { revenue: 600, multiple: 60, rationale: "Maintains strong enterprise growth and healthy margins." },
+    bull: { revenue: 800, multiple: 90, rationale: "Breakout capabilities lead to exponential adoption." }
+  });
+
+  // --- AI Agent Logic ---
+  const runLiveAgents = async () => {
+    setIsRunningAgents(true);
+    setActualIpoPrice(null);
+    setActualPriceSource(null);
+    setSharesNote("");
+    setCustomModel(customModel);
+    setAgentLogs({
+      checker: { status: 'loading', data: null, sources: [] },
+      financials: { status: 'idle', data: null, sources: [] },
+      market: { status: 'idle', data: null, sources: [] },
+      comps: { status: 'idle', data: null, sources: [] },
+      synthesis: { status: 'idle', data: null }
+    });
+
+    try {
+      if (!apiKey) {
+        // DEMO MODE WHEN NO API KEY IS PROVIDED
+        setProgress("Demo Mode: Agent 0 verifying entity context...");
+        await sleep(1500);
+
+        setAgentLogs(prev => ({
+          ...prev,
+          checker: {
+            status: 'complete',
+            data: `Entity: Snowflake Inc.\nIPO: 2020-09\nValid: true\n\nVerified specific operating company filing an S-1.`,
+            sources: [{ title: 'SEC.gov - Snowflake S-1', uri: '#' }]
+          },
+          financials: { status: 'loading', data: null, sources: [] },
+          market: { status: 'loading', data: null, sources: [] },
+          comps: { status: 'loading', data: null, sources: [] }
+        }));
+
+        setProgress("Demo Mode: Agents 1-3 researching...");
+        await sleep(2500);
+
+        setAgentLogs(prev => ({
+          ...prev,
+          financials: { status: 'complete', data: "• H1 2020 Revenue: $242M (133% YoY Growth)\n• Gross Margin: 61.6%\n• Implied Forward ARR: ~$500M+", sources: [{ title: 'TechCrunch: Snowflake S-1 Breakdown', uri: '#' }] },
+          market: { status: 'complete', data: "• Cloud software IPOs are trading at historical premiums (2020).\n• Average high-growth SaaS forward revenue multiple: 30x - 50x.\n• Massive retail and institutional appetite for data warehousing.", sources: [{ title: 'CNBC: 2020 Cloud IPO Market', uri: '#' }] },
+          comps: { status: 'complete', data: "• Datadog (DDOG): Trading at ~45x NTM Revenue.\n• Palantir (PLTR): Targeting $22B valuation (direct listing).\n• CrowdStrike (CRWD): Trading at ~40x NTM Revenue.", sources: [{ title: 'Yahoo Finance: Software Comps', uri: '#' }] },
+          synthesis: { status: 'loading', data: null }
+        }));
+
+        setProgress("Demo Mode: Agent 4 synthesizing scenarios...");
+        await sleep(2000);
+
+        setScenarios({
+          bear: { revenue: 500, multiple: 40, rationale: "Growth decelerates slightly; priced in line with lower-tier SaaS comps." },
+          base: { revenue: 550, multiple: 60, rationale: "Maintains 130%+ growth, commanding a premium to DDOG/CRWD multiples." },
+          bull: { revenue: 600, multiple: 85, rationale: "Market euphoria and unique data-sharing moat drive a record-breaking multiple." }
+        });
+        setActualIpoPrice(120.00); // Snowflake actually priced at $120
+        setActualPriceSource({ title: 'Demo data (not fetched)', uri: '#' });
+        setSharesOutstanding(277);
+        setSharesNote("Demo value.");
+
+        setAgentLogs(prev => ({ ...prev, synthesis: { status: 'complete', data: "Demo scenarios successfully synthesized." } }));
+        setProgress("Demo Analysis Complete.");
+        setTimeout(() => setProgress(""), 3000);
+        setIsRunningAgents(false);
+        return;
+      }
+
+      // 0. Agent 0: Checker / Entity Resolution
+      setProgress("Agent 0 verifying entity context...");
+      const isBacktest = mode === 'backtest' && targetCompany;
+      const rawTarget = isBacktest ? targetCompany : (uploadedFileName || "the uploaded S-1 company");
+
+      // Read the actual S-1 PDF (inline, Gemini supports PDFs up to ~20MB this way)
+      let pdfPart = null;
+      if (!isBacktest && uploadedFile) {
+        if (uploadedFile.size > 19 * 1024 * 1024) throw new Error("PDF is over ~19MB; Gemini inline upload limit. Try a smaller excerpt of the S-1.");
+        setProgress("Reading S-1 PDF...");
+        pdfPart = { inlineData: { mimeType: 'application/pdf', data: await fileToBase64(uploadedFile) } };
+      }
+      const withPdf = (text) => pdfPart ? [pdfPart, { text }] : [{ text }];
+
+      const jsonSpec = `Respond with ONLY a JSON object, no other text, with keys: "companyName" (string), "ipoDate" (string, YYYY-MM or "Upcoming"), "isValid" (boolean), "sharesOutstandingMillions" (number: total shares outstanding immediately after the IPO, in millions, or null if unknown), "explanation" (string, 1-2 sentences).`;
+      const checkerPrompt = isBacktest
+        ? `Identify the US stock ticker ${rawTarget}. isValid is false if it's an ETF, SPAC without a definitive target, or index; true if it's a specific operating company that went public via IPO or direct listing. ${jsonSpec}`
+        : `The attached document is an S-1 filing. Identify the company filing it. isValid is true if it is a real operating company's S-1. Take shares outstanding after the offering from the document if stated. ${jsonSpec}`;
+
+      const checkerPayload = {
+        contents: [{ role: 'user', parts: withPdf(checkerPrompt) }],
+        tools: [{ "googleSearch": {} }]
+      };
+
+      const checkerRes = await fetchWithRetry(checkerPayload, apiKey);
+      const checkerCandidate = checkerRes.candidates?.[0];
+      const checkerData = parseJsonFromText(getText(checkerCandidate)) || { isValid: false, explanation: "Failed to parse checker response." };
+      const checkerSources = getSources(checkerCandidate);
+
+      if (checkerData.isValid && Number(checkerData.sharesOutstandingMillions) > 0) {
+        setSharesOutstanding(Math.round(Number(checkerData.sharesOutstandingMillions) * 10) / 10);
+        setSharesNote("Set by Agent 0 — verify against the S-1.");
+      } else if (checkerData.isValid) {
+        setSharesNote("Agent 0 couldn't find this — enter it manually.");
+      }
+
+      setAgentLogs(prev => ({
+        ...prev,
+        checker: {
+          status: checkerData.isValid ? 'complete' : 'error',
+          data: `Entity: ${checkerData.companyName || 'Unknown'}\nIPO: ${checkerData.ipoDate || 'Unknown'}\nValid: ${checkerData.isValid}\n\n${checkerData.explanation}`,
+          sources: checkerSources
+        },
+        financials: { status: checkerData.isValid ? 'loading' : 'idle', data: null, sources: [] },
+        market: { status: checkerData.isValid ? 'loading' : 'idle', data: null, sources: [] },
+        comps: { status: checkerData.isValid ? 'loading' : 'idle', data: null, sources: [] }
+      }));
+
+      if (!checkerData.isValid) {
+        setProgress("Halted: Invalid company or entity type detected.");
+        setIsRunningAgents(false);
+        return;
+      }
+
+      // 1. Parallel Execution of Research Agents (1, 2, 3)
+      setProgress("Agents 1-3 researching via Google Search...");
+
+      const resolvedTarget = checkerData.companyName;
+      const timingContext = isBacktest ? `at the exact time ${resolvedTarget} went public (around ${checkerData.ipoDate})` : "currently";
+      const noLookahead = isBacktest
+        ? ` STRICT RULE: use only information that was public BEFORE ${resolvedTarget}'s IPO pricing date (${checkerData.ipoDate}). Ignore and do not mention anything published afterwards, including the actual IPO price, first-day trading, or later results. If a source is undated or later, skip it.`
+        : "";
+
+      const researchPrompts = [
+        {
+          key: 'financials',
+          usePdf: true,
+          prompt: pdfPart
+            ? `Act as an elite equity research analyst. From the attached S-1, extract the most recent annualized revenue (or run rate), revenue growth, and gross margin. Cite the S-1 section or page for EVERY number. Keep it to 3 concise bullet points.`
+            : `Act as an elite equity research analyst. Search for the annualized revenue and gross margins reported in the S-1 filing for ${resolvedTarget}. You MUST cite a dated public source for EVERY number. Keep it to 3 concise bullet points.${noLookahead}`
+        },
+        {
+          key: 'market',
+          prompt: `Act as an IPO market strategist. Search for the prevailing software/tech IPO market conditions and average forward revenue multiples ${timingContext}. Cite dated sources for every metric. Keep it to 3 concise bullet points.${noLookahead}`
+        },
+        {
+          key: 'comps',
+          prompt: `Act as a comparables analyst. Search for the public market valuations or private valuations of comparable companies ${timingContext}. Cite dated sources for every number. Keep it to 3 concise bullet points.${noLookahead}`
+        }
+      ];
+
+      // Prepare optional Agent 5 (Actual Price) if backtesting
+      let actualPricePromise = Promise.resolve(null);
+      if (isBacktest) {
+        const payload = {
+          contents: [{ role: 'user', parts: [{ text: `What was the final, official IPO price per share for ${resolvedTarget} (Ticker: ${targetCompany})? For a direct listing, give the reference price. Respond with ONLY a JSON object: {"price": number or null, "listingType": "IPO" or "direct listing", "note": short string}.` }] }],
+          tools: [{ "googleSearch": {} }]
+        };
+        actualPricePromise = fetchWithRetry(payload, apiKey).then(res => {
+          const cand = res.candidates?.[0];
+          const data = parseJsonFromText(getText(cand));
+          const price = Number(data?.price);
+          if (!(price > 0)) return null;
+          const src = getSources(cand)[0];
+          return { price, source: src || { title: 'Unsourced — verify manually', uri: '#' }, note: data?.listingType === 'direct listing' ? 'Direct listing reference price' : '' };
+        }).catch(() => null);
+      }
+
+      const researchPromises = researchPrompts.map(async ({ key, prompt, usePdf }) => {
+        const payload = {
+          contents: [{ role: 'user', parts: usePdf ? withPdf(prompt) : [{ text: prompt }] }],
+          tools: [{ "googleSearch": {} }]
+        };
+        const result = await fetchWithRetry(payload, apiKey);
+        const candidate = result.candidates?.[0];
+
+        const text = getText(candidate) || "No data found.";
+        const sources = getSources(candidate);
+
+        return { key, text, sources };
+      });
+
+      const researchResults = await Promise.allSettled(researchPromises);
+      const actualPriceRes = await actualPricePromise;
+
+      let combinedResearchText = "";
+      researchResults.forEach((res, index) => {
+        const key = researchPrompts[index].key;
+        if (res.status === 'fulfilled') {
+          combinedResearchText += `\n\n--- ${key.toUpperCase()} RESEARCH ---\n${res.value.text}`;
+        }
+      });
+
+      // Use functional state update to prevent overriding Agent 0's status with stale closure state
+      setAgentLogs(prev => {
+        const updated = { ...prev };
+        researchResults.forEach((res, index) => {
+          const key = researchPrompts[index].key;
+          if (res.status === 'fulfilled') {
+            updated[key] = { status: 'complete', data: res.value.text, sources: res.value.sources };
+          } else {
+            updated[key] = { status: 'error', data: "Failed to fetch data.", sources: [] };
+          }
+        });
+        updated.synthesis = { status: 'loading', data: null };
+        return updated;
+      });
+
+      setProgress("Agent 4 synthesizing scenarios...");
+
+      // 2. Agent 4: Scenario Synthesizer (Structured JSON)
+      const synthesisPayload = {
+        contents: [{
+          role: 'user',
+          parts: [{ text: `Based on the following research, generate Bear, Base, and Bull scenario valuation assumptions for ${resolvedTarget}.
+
+          Research Data:
+          ${combinedResearchText}
+
+          Generate realistic assumptions based on the cited numbers.` }]
+        }],
+        systemInstruction: {
+          parts: [{ text: "You are a quantitative modeler. Return ONLY valid JSON matching the schema. Forward multiples are typically between 5x and 100x." }]
+        },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              bear: {
+                type: "OBJECT",
+                properties: {
+                  revenue: { type: "NUMBER", description: "Estimated Forward Revenue in Millions USD (e.g., 150.5)" },
+                  multiple: { type: "NUMBER", description: "Forward Revenue Multiple (e.g., 20.5)" },
+                  rationale: { type: "STRING", description: "1-sentence justification citing the research." }
+                }
+              },
+              base: {
+                type: "OBJECT",
+                properties: {
+                  revenue: { type: "NUMBER" },
+                  multiple: { type: "NUMBER" },
+                  rationale: { type: "STRING" }
+                }
+              },
+              bull: {
+                type: "OBJECT",
+                properties: {
+                  revenue: { type: "NUMBER" },
+                  multiple: { type: "NUMBER" },
+                  rationale: { type: "STRING" }
+                }
+              }
+            },
+            required: ["bear", "base", "bull"]
+          }
+        }
+      };
+
+      const synthResult = await fetchWithRetry(synthesisPayload, apiKey);
+      const synthText = getText(synthResult.candidates?.[0]);
+
+      if (synthText) {
+        try {
+          const parsedScenarios = JSON.parse(synthText);
+          setScenarios({
+            bear: { ...parsedScenarios.bear, revenue: parsedScenarios.bear.revenue || 500, multiple: parsedScenarios.bear.multiple || 20 },
+            base: { ...parsedScenarios.base, revenue: parsedScenarios.base.revenue || 600, multiple: parsedScenarios.base.multiple || 40 },
+            bull: { ...parsedScenarios.bull, revenue: parsedScenarios.bull.revenue || 800, multiple: parsedScenarios.bull.multiple || 60 }
+          });
+          setAgentLogs(prev => ({ ...prev, synthesis: { status: 'complete', data: "Scenarios successfully synthesized and applied." } }));
+          if (actualPriceRes) { setActualIpoPrice(actualPriceRes.price); setActualPriceSource(actualPriceRes.source); }
+        } catch (e) {
+          setAgentLogs(prev => ({ ...prev, synthesis: { status: 'error', data: "Failed to parse scenario JSON." } }));
+        }
+      } else {
+        setAgentLogs(prev => ({ ...prev, synthesis: { status: 'error', data: "Agent 4 returned no text." } }));
+      }
+
+      setProgress("Analysis Complete.");
+      setTimeout(() => setProgress(""), 3000);
+
+    } catch (error) {
+      console.error(error);
+      setProgress(`Error: ${error.message}`);
+    } finally {
+      setIsRunningAgents(false);
+    }
+  };
+
+  const handleScenarioChange = (scenario, field, value) => {
+    setScenarios(prev => ({
+      ...prev,
+      [scenario]: {
+        ...prev[scenario],
+        [field]: value
+      }
+    }));
+  };
+
+  const verifyApiKey = async () => {
+    if (!apiKey) return;
+    setKeyStatus('testing');
+    setCustomModel(customModel);
+    let lastErrorMsg = null;
+    let success = false;
+
+    for (const model of MODELS_TO_TRY) {
+      try {
+        const res = await fetch(geminiUrl(model), {
+          method: 'POST',
+          headers: geminiHeaders(apiKey),
+          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'test' }] }] })
+        });
+
+        if (res.ok) {
+          setKeyStatus(`valid (using ${model})`);
+          success = true;
+          break;
+        } else if (res.status === 404) {
+          lastErrorMsg = `404 Not Found (${model})`;
+          continue; // Try the next model in the fallback list
+        } else if (res.status === 403 || res.status === 401) {
+          setKeyStatus('invalid (Unauthorized - check key)');
+          return;
+        } else if (res.status === 400) {
+          const errorData = await res.json().catch(() => ({}));
+          const msg = errorData.error?.message || "";
+          if (msg.toLowerCase().includes("key")) {
+            setKeyStatus(`invalid (Bad Request - ${msg})`);
+            return;
+          }
+          lastErrorMsg = `400 Bad Request (${model})`;
+          continue;
+        } else {
+          lastErrorMsg = `HTTP ${res.status}`;
+          continue;
+        }
+      } catch (err) {
+        // Log the error for this model but CONTINUE the loop to try the next one!
+        // This prevents CORS network errors (TypeError) on 404s/400s from breaking the fallback sequence.
+        lastErrorMsg = err.message;
+        continue;
+      }
+    }
+
+    if (!success) {
+      setKeyStatus(`error: ${lastErrorMsg || 'All attempted models failed'}`);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-indigo-500/30">
+
+      {/* HEADER */}
+      <header className="border-b border-slate-800 bg-slate-900/50 p-6 backdrop-blur-md sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+              <IconTrendingUp /> Universal S-1 IPO Valuation & Backtesting Lab
+            </h1>
+            <p className="text-sm text-slate-400 mt-1">Simulate Google ADK Multi-Agent Research & Compare to Reality</p>
+          </div>
+          <div className="flex items-center gap-4 bg-amber-500/10 border border-amber-500/20 px-4 py-2 rounded-lg text-amber-400 text-xs sm:text-sm max-w-md">
+            <IconAlert />
+            <p><strong>Strict Disclaimer:</strong> All modeled prices are hypothetical outputs of user-defined formulas and AI web research. Not financial advice or a prediction.</p>
+          </div>
+        </div>
+
+        {/* API Key Input */}
+        <div className="mt-4 flex flex-col gap-2 max-w-md">
+          <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 p-2 rounded-lg">
+            <div className="text-slate-400 pl-2"><IconKey /></div>
+            <input
+              type="password"
+              placeholder="Enter your Gemini API Key..."
+              value={apiKey}
+              onChange={(e) => { setApiKey(e.target.value); setKeyStatus(null); }}
+              className="bg-transparent border-none text-white text-sm w-full focus:outline-none placeholder-slate-600 font-mono"
+            />
+            <button
+              onClick={verifyApiKey}
+              disabled={!apiKey || keyStatus === 'testing'}
+              className="text-xs bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white px-3 py-1 rounded transition-colors whitespace-nowrap"
+            >
+              {keyStatus === 'testing' ? 'Testing...' : 'Verify Key'}
+            </button>
+          </div>
+          <div className="flex items-center justify-between ml-2">
+            <div>
+              {keyStatus?.startsWith('valid') && <span className="text-xs text-emerald-400">✓ {keyStatus}</span>}
+              {keyStatus?.startsWith('invalid') && <span className="text-xs text-rose-400">✗ {keyStatus}</span>}
+              {keyStatus?.startsWith('error') && <span className="text-xs text-rose-400">✗ {keyStatus}</span>}
+            </div>
+            <input
+              type="text"
+              placeholder="Optional model, e.g. gemini-3-pro-preview"
+              value={customModel}
+              onChange={(e) => { setCustomModelState(e.target.value); setKeyStatus(null); }}
+              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono w-56 mx-2 focus:outline-none placeholder-slate-600"
+            />
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline whitespace-nowrap">Get a free key</a>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto p-6 space-y-8">
+
+        {/* DATA SOURCE & CONTROLS */}
+        <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-xl flex flex-col lg:flex-row gap-6 justify-between items-stretch">
+
+          <div className="flex-1 space-y-4">
+            <div className="flex gap-4 border-b border-slate-800 pb-2">
+              <button
+                onClick={() => setMode('s1')}
+                className={`pb-2 text-sm font-semibold transition-colors ${mode === 's1' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                Analyze New S-1 (PDF)
+              </button>
+              <button
+                onClick={() => setMode('backtest')}
+                className={`pb-2 text-sm font-semibold transition-colors ${mode === 'backtest' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                Backtest Historical IPO
+              </button>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row gap-4 h-full">
+              {mode === 's1' ? (
+                <div className="relative flex-1 border-2 border-dashed border-slate-700 rounded-lg p-6 flex flex-col items-center justify-center text-center hover:border-indigo-500/50 transition-colors cursor-pointer group">
+                   <IconUpload className="text-slate-500 group-hover:text-indigo-400 mb-2 w-8 h-8" />
+                   <p className="text-sm font-medium text-slate-300">{uploadedFileName || "Drag & Drop S-1 PDF Here"}</p>
+                   <p className="text-xs text-slate-500 mt-1">Or tap to browse (PDF, max ~19MB; sent to Gemini)</p>
+                   <input type="file" accept="application/pdf" className="hidden" id="fileUpload" onChange={(e) => { const f = e.target.files[0]; setUploadedFile(f || null); setUploadedFileName(f?.name || ""); }} />
+                   <label htmlFor="fileUpload" className="absolute inset-0 cursor-pointer"></label>
+                </div>
+              ) : (
+                <div className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-4 flex flex-col justify-center">
+                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">Search Historical Ticker</label>
+                  <div className="flex items-center gap-2 border-b border-slate-700 pb-1">
+                    <IconSearch />
+                    <input
+                      type="text"
+                      placeholder="e.g. SNOW, UBER, ABNB"
+                      value={targetCompany}
+                      onChange={(e) => setTargetCompany(e.target.value.toUpperCase())}
+                      className="bg-transparent text-white text-xl font-bold w-full focus:outline-none placeholder-slate-600 uppercase"
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500 mt-3">Agents will research the environment *at the time* of this IPO.</p>
+                </div>
+              )}
+
+              <div className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-4 flex flex-col justify-center">
+                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">Shares Outstanding (Millions)</label>
+                <div className="flex items-center gap-2 border-b border-slate-700 pb-1">
+                  <IconFileText />
+                  <input
+                    type="number"
+                    value={sharesOutstanding}
+                    onChange={(e) => setSharesOutstanding(Number(e.target.value) || 1)}
+                    className="bg-transparent text-white text-xl font-mono w-full focus:outline-none rounded p-1"
+                  />
+                </div>
+                <p className="text-xs text-slate-500 mt-2">{sharesNote || "Post-IPO shares. Agent 0 tries to fill this; check it."}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-shrink-0 flex flex-col justify-center items-center gap-3 bg-indigo-950/30 p-6 rounded-xl border border-indigo-900/50 min-w-[250px]">
+             <button
+                onClick={runLiveAgents}
+                disabled={isRunningAgents || (mode === 's1' && !uploadedFileName)}
+                className="w-full flex justify-center items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-6 py-4 rounded-lg font-bold transition-all shadow-[0_0_15px_rgba(79,70,229,0.4)]"
+              >
+                {isRunningAgents ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <IconPlay />}
+                {isRunningAgents ? 'Agents Running...' : 'Run ADK Agents'}
+              </button>
+              {progress && <p className="text-indigo-400 text-xs animate-pulse text-center">{progress}</p>}
+          </div>
+        </section>
+
+        {/* AGENT RESEARCH LOGS */}
+        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <AgentCard title="Agent 0: Entity Checker" icon={<IconShieldCheck />} log={agentLogs.checker} />
+          <AgentCard title="Agent 1: Financials" icon={<IconSearch />} log={agentLogs.financials} />
+          <AgentCard title="Agent 2: IPO Market" icon={<IconSearch />} log={agentLogs.market} />
+          <AgentCard title="Agent 3: Comparables" icon={<IconSearch />} log={agentLogs.comps} />
+        </section>
+
+        {/* VALUATION SCENARIOS */}
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+            <h2 className="text-xl font-bold text-white">Interactive Valuation Scenarios</h2>
+            <span className="text-xs bg-slate-800 text-slate-300 px-2 py-1 rounded">Agent 4 Synthesis</span>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <ScenarioCard
+              name="Bear Case"
+              theme="rose"
+              data={scenarios.bear}
+              shares={sharesOutstanding}
+              actualIpoPrice={actualIpoPrice}
+              actualPriceSource={actualPriceSource}
+              onChange={(f, v) => handleScenarioChange('bear', f, v)}
+            />
+            <ScenarioCard
+              name="Base Case"
+              theme="indigo"
+              data={scenarios.base}
+              shares={sharesOutstanding}
+              actualIpoPrice={actualIpoPrice}
+              actualPriceSource={actualPriceSource}
+              onChange={(f, v) => handleScenarioChange('base', f, v)}
+            />
+            <ScenarioCard
+              name="Bull Case"
+              theme="emerald"
+              data={scenarios.bull}
+              shares={sharesOutstanding}
+              actualIpoPrice={actualIpoPrice}
+              actualPriceSource={actualPriceSource}
+              onChange={(f, v) => handleScenarioChange('bull', f, v)}
+            />
+          </div>
+        </section>
+
+      </main>
+    </div>
+  );
+}
+
+// --- Subcomponents ---
+
+function AgentCard({ title, icon, log }) {
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-col h-72">
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-3 mb-3 text-slate-300">
+        {icon}
+        <h3 className="font-semibold text-sm">{title}</h3>
+        {log.status === 'loading' && <span className="ml-auto flex h-3 w-3 relative"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span></span>}
+        {log.status === 'complete' && <span className="ml-auto text-xs text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded">Complete</span>}
+      </div>
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar text-sm text-slate-400 whitespace-pre-wrap pr-2">
+        {log.status === 'idle' && <span className="text-slate-600 italic">Awaiting execution...</span>}
+        {log.status === 'loading' && <span className="text-indigo-400/70 italic animate-pulse">Scouring the web for real-time data...</span>}
+        {log.status === 'error' && <span className="text-rose-400">{log.data}</span>}
+        {log.status === 'complete' && log.data}
+      </div>
+
+      {log.sources && log.sources.length > 0 && (
+        <div className="mt-3 pt-3 border-t border-slate-800">
+          <p className="text-xs font-semibold text-slate-500 mb-1">Grounding Sources:</p>
+          <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
+            {log.sources.map((s, i) => (
+              <a key={i} href={s.uri} target="_blank" rel="noreferrer" className="text-[10px] bg-slate-800 hover:bg-slate-700 text-indigo-300 px-2 py-1 rounded truncate max-w-full">
+                {s.title}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScenarioCard({ name, theme, data, shares, actualIpoPrice, actualPriceSource, onChange }) {
+  // Plain code doing math dynamically
+  const revenueNum = parseFloat(data.revenue) || 0;
+  const multipleNum = parseFloat(data.multiple) || 0;
+
+  // Valuation in Millions
+  const valuationM = revenueNum * multipleNum;
+  // Valuation in Billions
+  const valuationB = valuationM / 1000;
+
+  // Dynamic Formatting for M, B, and T
+  let formattedValuation = `$${valuationB.toFixed(2)}B`;
+  let formulaValDisplay = `$${valuationM.toLocaleString()}M`;
+  let formulaSharesDisplay = `${shares}M`;
+
+  if (valuationB >= 1000) {
+    formattedValuation = `$${(valuationB / 1000).toFixed(2)}T`;
+    formulaValDisplay = `$${(valuationB / 1000).toFixed(2)}T`;
+  } else if (valuationB < 1) {
+    formattedValuation = `$${valuationM.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}M`;
+  }
+
+  if (shares >= 1000) {
+    formulaSharesDisplay = `${(shares / 1000).toFixed(2)}B`;
+  }
+
+  // Hypothetical Price Per Share
+  // Both Valuation and Shares are in Millions, so M / M cancels out smoothly
+  const pricePerShare = shares > 0 ? (valuationM / shares) : 0;
+
+  // Theme colors
+  const themes = {
+    rose: 'border-rose-900/50 bg-rose-950/20 text-rose-400',
+    indigo: 'border-indigo-900/50 bg-indigo-950/20 text-indigo-400',
+    emerald: 'border-emerald-900/50 bg-emerald-950/20 text-emerald-400'
+  };
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col">
+      {/* Header */}
+      <div className={`p-4 border-b flex justify-between items-center ${themes[theme]}`}>
+        <h3 className="font-bold text-lg">{name}</h3>
+        <IconEdit />
+      </div>
+
+      {/* Editor */}
+      <div className="p-5 space-y-4 flex-1 border-b border-slate-800">
+        <p className="text-xs text-slate-400 italic mb-4 leading-relaxed line-clamp-2 h-8" title={data.rationale}>
+          "{data.rationale}"
+        </p>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Rev Run Rate ($M)</label>
+            <input
+              type="number" step="1"
+              value={data.revenue}
+              onChange={e => onChange('revenue', e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 text-white rounded p-2 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Forward Multiple (x)</label>
+            <input
+              type="number" step="0.5"
+              value={data.multiple}
+              onChange={e => onChange('multiple', e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 text-white rounded p-2 focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Output / Math Engine */}
+      <div className="p-5 bg-slate-950 space-y-4">
+        {/* Math Display */}
+        <div className="bg-slate-900 p-3 rounded-lg border border-slate-800 font-mono text-xs text-slate-400 space-y-1">
+          <div className="flex justify-between">
+            <span>Valuation ($M)</span>
+            <span>= Rev * Multiple</span>
+          </div>
+          <div className="flex justify-between text-white font-semibold">
+            <span>Formula</span>
+            <span>= {revenueNum} * {multipleNum}</span>
+          </div>
+        </div>
+
+        {/* Enterprise Value */}
+        <div className="flex justify-between items-end pt-2">
+          <span className="text-sm font-medium text-slate-400">Implied Valuation</span>
+          <span className="text-2xl font-bold text-white">{formattedValuation}</span>
+        </div>
+
+        {/* Per Share Math */}
+        <div className="bg-amber-950/20 border border-amber-900/30 p-4 rounded-lg mt-4 space-y-2 relative overflow-hidden">
+           <div className="flex justify-between text-[10px] text-amber-500/70 font-mono">
+            <span>Price/Share</span>
+            <span>= Val / Shares</span>
+          </div>
+          <div className="flex justify-between text-[10px] text-amber-500/70 font-mono pb-2 border-b border-amber-900/30">
+            <span>Formula</span>
+            <span>= {formulaValDisplay} / {formulaSharesDisplay}</span>
+          </div>
+          <div className="flex justify-between items-end pt-1">
+            <div>
+              <span className="block text-xs font-bold text-amber-500">HYPOTHETICAL</span>
+              <span className="block text-[10px] text-amber-500/70">PRICE PER SHARE</span>
+            </div>
+            <span className="text-3xl font-bold text-amber-400">
+              ${pricePerShare.toFixed(2)}
+            </span>
+          </div>
+        </div>
+
+        {/* Backtest Reality Check Overlay */}
+        {actualIpoPrice !== null && (
+          <div className="mt-3 bg-slate-800/50 border border-slate-700 p-3 rounded-lg flex items-center justify-between">
+            <div>
+              <span className="block text-[10px] font-bold text-slate-400 uppercase">Actual IPO Price</span>
+              {actualPriceSource && actualPriceSource.uri !== '#'
+                ? <a href={actualPriceSource.uri} target="_blank" rel="noreferrer" className="block text-[10px] text-indigo-300 underline truncate max-w-[140px]">{actualPriceSource.title}</a>
+                : <span className="block text-[10px] text-slate-500">{actualPriceSource?.title || '(Historical Reality)'}</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xl font-bold text-white">${actualIpoPrice.toFixed(2)}</span>
+              {Math.abs(pricePerShare - actualIpoPrice) / actualIpoPrice < 0.15 ? (
+                <span className="bg-emerald-500/20 text-emerald-400 text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/20">Close!</span>
+              ) : (
+                <span className="bg-slate-700 text-slate-400 text-[10px] px-1.5 py-0.5 rounded border border-slate-600">Off</span>
+              )}
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script></body></html>
