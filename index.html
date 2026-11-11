@@ -138,6 +138,8 @@ function App() {
   const [sharesOutstanding, setSharesOutstanding] = useState(277); // 277M default (e.g. SNOW)
   const [uploadedFileName, setUploadedFileName] = useState("");
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [secUrl, setSecUrl] = useState(""); // alternative to PDF: read the S-1 straight from SEC.gov
+  const secUrlOk = /^https:\/\/(www\.)?sec\.gov\/Archives\/edgar\//i.test(secUrl.trim());
   const [customModel, setCustomModelState] = useState("");
   const [actualPriceSource, setActualPriceSource] = useState(null);
   const [sharesNote, setSharesNote] = useState("");
@@ -229,7 +231,7 @@ function App() {
       // 0. Agent 0: Checker / Entity Resolution
       setProgress("Agent 0 verifying entity context...");
       const isBacktest = mode === 'backtest' && targetCompany;
-      const rawTarget = isBacktest ? targetCompany : (uploadedFileName || "the uploaded S-1 company");
+      const rawTarget = isBacktest ? targetCompany : (uploadedFileName || (secUrlOk ? secUrl.trim() : "the uploaded S-1 company"));
 
       // Read the actual S-1 PDF (inline, Gemini supports PDFs up to ~20MB this way)
       let pdfPart = null;
@@ -238,16 +240,21 @@ function App() {
         setProgress("Reading S-1 PDF...");
         pdfPart = { inlineData: { mimeType: 'application/pdf', data: await fileToBase64(uploadedFile) } };
       }
-      const withPdf = (text) => pdfPart ? [pdfPart, { text }] : [{ text }];
+      // Or: have Gemini read the filing directly from SEC.gov (URL context tool)
+      const useSecUrl = !isBacktest && !pdfPart && secUrlOk;
+      const urlNote = useSecUrl ? `\n\nThe S-1 is at this SEC EDGAR URL; read it: ${secUrl.trim()}` : "";
+      const withPdf = (text) => pdfPart ? [pdfPart, { text }] : [{ text: text + urlNote }];
+      const docTools = useSecUrl ? [{ "urlContext": {} }, { "googleSearch": {} }] : [{ "googleSearch": {} }];
+      if (useSecUrl) setProgress("Reading S-1 from SEC.gov...");
 
       const jsonSpec = `Respond with ONLY a JSON object, no other text, with keys: "companyName" (string), "ipoDate" (string, YYYY-MM or "Upcoming"), "isValid" (boolean), "sharesOutstandingMillions" (number: total shares outstanding immediately after the IPO, in millions, or null if unknown), "explanation" (string, 1-2 sentences).`;
       const checkerPrompt = isBacktest
         ? `Identify the US stock ticker ${rawTarget}. isValid is false if it's an ETF, SPAC without a definitive target, or index; true if it's a specific operating company that went public via IPO or direct listing. ${jsonSpec}`
-        : `The attached document is an S-1 filing. Identify the company filing it. isValid is true if it is a real operating company's S-1. Take shares outstanding after the offering from the document if stated. ${jsonSpec}`;
+        : `The ${useSecUrl ? 'linked' : 'attached'} document is an S-1 filing. Identify the company filing it. isValid is true if it is a real operating company's S-1. Take shares outstanding after the offering from the document if stated. ${jsonSpec}`;
 
       const checkerPayload = {
         contents: [{ role: 'user', parts: withPdf(checkerPrompt) }],
-        tools: [{ "googleSearch": {} }]
+        tools: docTools
       };
 
       const checkerRes = await fetchWithRetry(checkerPayload, apiKey);
@@ -293,8 +300,8 @@ function App() {
         {
           key: 'financials',
           usePdf: true,
-          prompt: pdfPart
-            ? `Act as an elite equity research analyst. From the attached S-1, extract the most recent annualized revenue (or run rate), revenue growth, and gross margin. Cite the S-1 section or page for EVERY number. Keep it to 3 concise bullet points.`
+          prompt: (pdfPart || useSecUrl)
+            ? `Act as an elite equity research analyst. From the ${useSecUrl ? 'linked' : 'attached'} S-1, extract the most recent annualized revenue (or run rate), revenue growth, and gross margin. Cite the S-1 section or page for EVERY number. Keep it to 3 concise bullet points.`
             : `Act as an elite equity research analyst. Search for the annualized revenue and gross margins reported in the S-1 filing for ${resolvedTarget}. You MUST cite a dated public source for EVERY number. Keep it to 3 concise bullet points.${noLookahead}`
         },
         {
@@ -327,7 +334,7 @@ function App() {
       const researchPromises = researchPrompts.map(async ({ key, prompt, usePdf }) => {
         const payload = {
           contents: [{ role: 'user', parts: usePdf ? withPdf(prompt) : [{ text: prompt }] }],
-          tools: [{ "googleSearch": {} }]
+          tools: usePdf ? docTools : [{ "googleSearch": {} }]
         };
         const result = await fetchWithRetry(payload, apiKey);
         const candidate = result.candidates?.[0];
@@ -576,7 +583,7 @@ function App() {
                 onClick={() => setMode('s1')}
                 className={`pb-2 text-sm font-semibold transition-colors ${mode === 's1' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}
               >
-                Analyze New S-1 (PDF)
+                Analyze New S-1 (PDF or SEC link)
               </button>
               <button
                 onClick={() => setMode('backtest')}
@@ -588,12 +595,30 @@ function App() {
 
             <div className="pt-2 flex flex-col sm:flex-row gap-4 h-full">
               {mode === 's1' ? (
+                <div className="flex-1 flex flex-col gap-3">
                 <div className="relative flex-1 border-2 border-dashed border-slate-700 rounded-lg p-6 flex flex-col items-center justify-center text-center hover:border-indigo-500/50 transition-colors cursor-pointer group">
                    <IconUpload className="text-slate-500 group-hover:text-indigo-400 mb-2 w-8 h-8" />
                    <p className="text-sm font-medium text-slate-300">{uploadedFileName || "Drag & Drop S-1 PDF Here"}</p>
                    <p className="text-xs text-slate-500 mt-1">Or tap to browse (PDF, max ~19MB; sent to Gemini)</p>
                    <input type="file" accept="application/pdf" className="hidden" id="fileUpload" onChange={(e) => { const f = e.target.files[0]; setUploadedFile(f || null); setUploadedFileName(f?.name || ""); }} />
                    <label htmlFor="fileUpload" className="absolute inset-0 cursor-pointer"></label>
+                </div>
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-1">Or read it from SEC.gov</label>
+                  <input
+                    type="url"
+                    placeholder="https://www.sec.gov/Archives/edgar/data/.../...htm"
+                    value={secUrl}
+                    onChange={(e) => setSecUrl(e.target.value)}
+                    className="bg-transparent text-white text-sm w-full focus:outline-none border-b border-slate-700 pb-1 placeholder-slate-600"
+                  />
+                  <div className="flex justify-between items-center mt-2 text-xs">
+                    <span className={secUrl && !secUrlOk ? 'text-rose-400' : 'text-slate-500'}>
+                      {secUrl && !secUrlOk ? 'Must be an sec.gov/Archives/edgar/ link' : (uploadedFile ? 'PDF takes priority if both are set' : 'Gemini reads the filing directly')}
+                    </span>
+                    {secUrlOk && <a href={secUrl.trim()} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300">Open on SEC.gov ↗</a>}
+                  </div>
+                </div>
                 </div>
               ) : (
                 <div className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-4 flex flex-col justify-center">
@@ -631,7 +656,7 @@ function App() {
           <div className="flex-shrink-0 flex flex-col justify-center items-center gap-3 bg-indigo-950/30 p-6 rounded-xl border border-indigo-900/50 min-w-[250px]">
              <button
                 onClick={runLiveAgents}
-                disabled={isRunningAgents || (mode === 's1' && !uploadedFileName)}
+                disabled={isRunningAgents || (mode === 's1' && !uploadedFileName && !secUrlOk)}
                 className="w-full flex justify-center items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:cursor-not-allowed text-white px-6 py-4 rounded-lg font-bold transition-all shadow-[0_0_15px_rgba(79,70,229,0.4)]"
               >
                 {isRunningAgents ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full" /> : <IconPlay />}
