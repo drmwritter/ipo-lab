@@ -20,9 +20,30 @@ const IconFileText = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" he
 const IconKey = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path></svg>;
 
 // --- API Helper ---
-const DEFAULT_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+// Current models as of Nov 2026 (2.0 and 2.5 Flash are shut down). Newest first.
+const DEFAULT_MODELS = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-pro'];
+let DISCOVERED = [];
 let MODELS_TO_TRY = DEFAULT_MODELS;
-const setCustomModel = (m) => { MODELS_TO_TRY = m && m.trim() ? [m.trim(), ...DEFAULT_MODELS] : DEFAULT_MODELS; };
+const setCustomModel = (m) => {
+  const base = DISCOVERED.length ? DISCOVERED : DEFAULT_MODELS;
+  MODELS_TO_TRY = m && m.trim() ? [m.trim(), ...base.filter(x => x !== m.trim())] : base;
+};
+// Ask the API which models this key can actually use, and keep our preferred order.
+const discoverModels = async (apiKey) => {
+  try {
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': apiKey.trim() } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const avail = (data.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name.replace(/^models\//, ''))
+      .filter(n => /^gemini-/.test(n) && !/(tts|image|live|embedding|audio|robotics|transcribe)/.test(n));
+    const preferred = DEFAULT_MODELS.filter(m => avail.includes(m));
+    const others = avail.filter(m => !preferred.includes(m) && /flash|pro/.test(m)).sort().reverse();
+    DISCOVERED = [...preferred, ...others];
+    return DISCOVERED;
+  } catch (e) { return []; }
+};
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 const geminiHeaders = (apiKey) => ({ 'Content-Type': 'application/json', 'x-goog-api-key': apiKey.trim() });
 
@@ -136,6 +157,7 @@ function App() {
     setActualIpoPrice(null);
     setActualPriceSource(null);
     setSharesNote("");
+    if (apiKey && !DISCOVERED.length) await discoverModels(apiKey);
     setCustomModel(customModel);
     setAgentLogs({
       checker: { status: 'loading', data: null, sources: [] },
@@ -427,6 +449,7 @@ function App() {
   const verifyApiKey = async () => {
     if (!apiKey) return;
     setKeyStatus('testing');
+    await discoverModels(apiKey);
     setCustomModel(customModel);
     let lastErrorMsg = null;
     let success = false;
@@ -520,7 +543,7 @@ function App() {
             </div>
             <input
               type="text"
-              placeholder="Optional model, e.g. gemini-3-pro-preview"
+              placeholder="Optional model, e.g. gemini-3.8-flash"
               value={customModel}
               onChange={(e) => { setCustomModelState(e.target.value); setKeyStatus(null); }}
               className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono w-56 mx-2 focus:outline-none placeholder-slate-600"
