@@ -23,9 +23,12 @@ const IconKey = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height=
 // Current models as of Nov 2026 (2.0 and 2.5 Flash are shut down). Newest first.
 const DEFAULT_MODELS = ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-pro'];
 let DISCOVERED = [];
+let WORKING_MODEL = null;
+const RETIRED = /^gemini-(1\.|2\.0|2\.5-flash)/; // shut down or unavailable to new keys
 let MODELS_TO_TRY = DEFAULT_MODELS;
 const setCustomModel = (m) => {
-  const base = DISCOVERED.length ? DISCOVERED : DEFAULT_MODELS;
+  let base = DISCOVERED.length ? DISCOVERED : DEFAULT_MODELS;
+  if (WORKING_MODEL) base = [WORKING_MODEL, ...base.filter(x => x !== WORKING_MODEL)];
   MODELS_TO_TRY = m && m.trim() ? [m.trim(), ...base.filter(x => x !== m.trim())] : base;
 };
 // Ask the API which models this key can actually use, and keep our preferred order.
@@ -37,7 +40,7 @@ const discoverModels = async (apiKey) => {
     const avail = (data.models || [])
       .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
       .map(m => m.name.replace(/^models\//, ''))
-      .filter(n => /^gemini-/.test(n) && !/(tts|image|live|embedding|audio|robotics|transcribe)/.test(n));
+      .filter(n => /^gemini-/.test(n) && !RETIRED.test(n) && !/(tts|image|live|embedding|audio|robotics|transcribe)/.test(n));
     const preferred = DEFAULT_MODELS.filter(m => avail.includes(m));
     const others = avail.filter(m => !preferred.includes(m) && /flash|pro/.test(m)).sort().reverse();
     DISCOVERED = [...preferred, ...others];
@@ -91,38 +94,35 @@ const fileToBase64 = (file) => new Promise((resolve, reject) => {
 });
 
 const fetchWithRetry = async (payload, apiKey, retries = 2, delay = 1000) => {
-  let lastError;
+  const errors = []; // one entry per model, so the real cause isn't hidden behind the last fallback's 404
   for (const model of MODELS_TO_TRY) {
     for (let i = 0; i < retries; i++) {
+      let response;
       try {
-        const response = await geminiPost(model, payload, apiKey);
-        if (!response.ok) {
-          if (response.status === 404) {
-            lastError = new Error(`HTTP 404: Model ${model} not found`);
-            break; // Break retry loop for this model, fallback to next model
-          }
-          if (response.status === 400) {
-            const errData = await response.json().catch(() => ({}));
-            if (errData.error?.message?.toLowerCase().includes("key")) {
-                throw new Error(`Invalid API Key: ${errData.error.message}`);
-            }
-            lastError = new Error(`HTTP 400: Model ${model} failed`);
-            break;
-          }
-          if (response.status === 429) throw new Error("Rate limited");
-          throw new Error(`HTTP ${response.status}`);
-        }
-        return await response.json();
+        response = await geminiPost(model, payload, apiKey);
       } catch (err) {
-        lastError = err;
-        // If it's a 404, 400, or a CORS error (TypeError) caused by missing headers, break and try next model
-        if (err.message.includes("404") || err.message.includes("400") || err.message.includes("Invalid API Key") || err.name === "TypeError") break;
-        if (i === retries - 1) break; // Max retries hit, move to next model if any
-        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+        errors.push(`${model}: network error (${err.message})`);
+        break;
       }
+      if (response.ok) {
+        WORKING_MODEL = model; // remember it, so later calls try it first
+        return await response.json();
+      }
+      const errData = await response.json().catch(() => ({}));
+      const msg = errData.error?.message || '';
+      if (response.status === 400 && msg.toLowerCase().includes('api key')) throw new Error(`Invalid API Key: ${msg}`);
+      if ((response.status === 429 || response.status >= 500) && i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+        continue;
+      }
+      errors.push(`${model}: HTTP ${response.status}${msg ? ' ' + msg : ''}`);
+      break;
     }
   }
-  throw lastError; // Throw if all models fail
+  // Report the most informative error: anything other than a plain 404 first.
+  const best = errors.find(e => !/HTTP 404/.test(e)) || errors[0] || 'no models to try';
+  console.warn('Gemini errors:', errors);
+  throw new Error(`All models failed. ${best}${errors.length > 1 ? ` (+${errors.length - 1} more; see console)` : ''}`);
 };
 
 // --- Mock Data for Demo Mode ---
@@ -470,6 +470,7 @@ function App() {
         const res = await geminiPost(model, { contents: [{ role: 'user', parts: [{ text: 'test' }] }] }, apiKey);
 
         if (res.ok) {
+          WORKING_MODEL = model;
           setKeyStatus(`valid (using ${model})`);
           success = true;
           break;
